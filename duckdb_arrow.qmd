@@ -1,0 +1,363 @@
+---
+title: "duckdb_arrow"
+
+editor: "source"
+---
+
+Tutorial from: <https://r4ds.hadley.nz/arrow.html>
+
+## Load library packages
+
+```{r}
+library(tidyverse)
+library(arrow)
+library(fs)
+# library(dbplyr)
+# library(duckdb)
+```
+
+## Get data
+
+The following a cached copy of the 9GB CSV data.
+
+```{r}
+#| eval: false
+#| echo: fenced
+fs::dir_create("data") # dir.create("data", showWarnings = FALSE)
+
+curl::multi_download(
+  "https://r4ds.s3.us-west-2.amazonaws.com/seattle-library-checkouts.csv",
+  "data/seattle-library-checkouts.csv",
+  resume = TRUE
+)
+```
+
+## Opening a dataset
+
+```{r}
+seattle_csv <- arrow::open_dataset(
+  sources = "data/seattle-library-checkouts.csv", 
+  format = "csv"
+  # schema = schema(UsageClass = string(), CheckoutType = string(),
+  #            MaterialType = string(), CheckoutYear = int64(),
+  #            CheckoutMonth = int64(), Checkouts = int64(),
+  #            Title = string(), ISBN = string(),
+  #            Creator = string(), Subjects = string(),
+  #            Publisher = string(), PublicationYear = string())
+)
+```
+
+## peak at the data
+
+```{r}
+seattle_csv
+```
+
+```{r}
+seattle_csv |> 
+  select(-ISBN) |> 
+  glimpse()
+```
+
+## dplyr
+
+the collect() function will force arrow to perform the compuation and return some data
+
+```{r}
+seattle_csv |> 
+  # select(-ISBN) |> 
+  count(CheckoutYear, wt = Checkouts) |> 
+  arrange(CheckoutYear) |> 
+  collect()
+```
+
+```{r}
+seattle_csv |> 
+  filter(UsageClass == "Digital",
+         MaterialType == "EBOOK") |> 
+  # head(100) |> 
+  count(CheckoutType) |> 
+  collect()
+
+seattle_csv |> 
+  distinct(CheckoutYear) |> 
+  collect()
+
+seattle_csv |> 
+  distinct(CheckoutYear) |> 
+  collect() |> 
+  arrange(CheckoutYear)
+```
+
+\^\^\^ was slow. Switch to parquet to make it faster
+
+## Rewriting Seattle library data to Parquet
+
+As a rough guide, arrow suggests that you avoid files smaller than 20MB and larger than 2GB and avoid partitions that produce more than 10,000 files.
+
+```{r}
+pq_path <- "data/seattle-library-checkouts"
+seattle_csv |>
+  select(-ISBN) |> 
+  # filter(UsageClass == "Digital") |> 
+  group_by(CheckoutYear) |>
+  write_dataset(path = pq_path, format = "parquet")
+```
+
+Let's take a look at what we just produced:
+
+```{r}
+tibble(
+  files = fs::dir_ls(pq_path, glob = "*.parquet", recursive = TRUE),
+  size_MB = fs::file_size(files) / 1024^2
+)
+```
+
+Open parquet files
+
+```{r}
+seattle_pq <- open_dataset(pq_path)
+```
+
+### test
+
+```{r}
+query <- seattle_pq |> 
+  filter(CheckoutYear >= 2018, MaterialType == "BOOK") |>
+  group_by(CheckoutYear, CheckoutMonth) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(CheckoutYear, CheckoutMonth)
+
+query_too <- seattle_pq |> 
+  filter(UsageClass == "Digital",
+         MaterialType == "EBOOK") |> 
+  count(CheckoutType) 
+```
+
+translate `dplyr` into `Apache Arrow C++`
+
+```{r}
+query
+```
+
+execute arrow query via `collect()`
+
+```{r}
+query |> collect()
+```
+
+```{r}
+query_too 
+query_too |> collect()
+```
+
+## Benchmarking
+
+```{r}
+seattle_csv |> 
+  filter(CheckoutYear == 2021, MaterialType == "BOOK") |>
+  group_by(CheckoutMonth) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(desc(CheckoutMonth)) |>
+  collect() |> 
+  system.time()
+```
+
+```{r}
+seattle_pq |> 
+  filter(CheckoutYear == 2021, MaterialType == "BOOK") |>
+  group_by(CheckoutMonth) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(desc(CheckoutMonth)) |>
+  collect() |> 
+  system.time()
+```
+
+```{r}
+seattle_csv |> 
+  filter(UsageClass == "Digital",
+         MaterialType == "EBOOK") |> 
+  count(CheckoutType)  |> 
+  collect() |> 
+  system.time()
+
+query_too |> 
+  collect() |> 
+  system.time()
+```
+
+## dbplyr with arrow & DUCKDB
+
+```{r}
+seattle_pq |> 
+  to_duckdb() |>
+  filter(CheckoutYear >= 2018, MaterialType == "BOOK") |>
+  group_by(CheckoutYear) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(desc(CheckoutYear)) |>
+  collect()
+```
+
+```{r}
+seattle_pq |> 
+  to_duckdb() |>                # TO DUCKDB
+  filter(CheckoutYear >= 2018, MaterialType == "BOOK") |>
+  group_by(CheckoutYear) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(desc(CheckoutYear)) |>
+  collect() |> 
+  system.time()
+
+seattle_pq |> 
+  filter(CheckoutYear >= 2018, MaterialType == "BOOK") |>
+  group_by(CheckoutYear) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(desc(CheckoutYear)) |>
+  collect() |> 
+  system.time()
+
+seattle_csv |> 
+  filter(CheckoutYear >= 2018, MaterialType == "BOOK") |>
+  group_by(CheckoutYear) |>
+  summarize(TotalCheckouts = sum(Checkouts)) |>
+  arrange(desc(CheckoutYear)) |>
+  collect() |> 
+  system.time()
+```
+
+## DuckDB
+
+```{r}
+library(dbplyr)
+library(duckdb)
+```
+
+```{r}
+con <- con <- DBI::dbConnect(duckdb::duckdb())
+```
+
+If you want to use duckdb for a real data analysis project, you'll also need to supply the dbdir argument to make a persistent database and tell duckdb where to save it.
+
+> Database is garbage-collected, use dbDisconnect(con, shutdown=TRUE) or duckdb::duckdb_shutdown(drv) to avoid this.
+
+```{r}
+con <- DBI::dbConnect(duckdb::duckdb(), dbdir = "duckdb")
+```
+
+```{r}
+#| eval: false
+
+dbDisconnect(con, shutdown=TRUE)
+dbWriteTable(con, "mpg", ggplot2::mpg)
+dbWriteTable(con, "diamonds", ggplot2::diamonds)
+```
+
+```{r}
+dbListTables(con)
+```
+
+```{r}
+con |> 
+  dbReadTable("diamonds") |> 
+  as_tibble()
+
+con |> 
+  dbReadTable("mpg") |> 
+  as_tibble()
+```
+
+### SQL
+
+```{r}
+sql <- "
+  SELECT carat, cut, clarity, color, price 
+  FROM diamonds 
+  WHERE price > 15000
+"
+
+as_tibble(dbGetQuery(con, sql))
+```
+
+```{r}
+diamonds_db <- tbl(con, "diamonds")
+diamonds_db
+```
+
+There are two other common ways to interact with a database. First, many corporate databases are very large so you need some hierarchy to keep all the tables organized. In that case you might need to supply a schema, or a catalog and a schema, in order to pick the table you're interested in:
+
+> diamonds_db \<- tbl(con, in_schema("sales", "diamonds")) diamonds_db \<- tbl(con, in_catalog("north_america", "sales", "diamonds"))
+
+Other times you might want to use your own SQL query as a starting point:
+
+> diamonds_db \<- tbl(con, sql("SELECT \* FROM diamonds"))
+
+```{r}
+big_diamonds_db <- diamonds_db |> 
+  filter(price > 15000) |> 
+  select(carat:clarity, price)
+big_diamonds_db
+```
+
+```{r}
+big_diamonds_db |>
+  show_query()
+```
+
+```{r}
+big_diamonds <- big_diamonds_db |> 
+  collect()
+big_diamonds
+```
+
+## duckdb and pivot \[?\]
+
+```{r}
+con |> 
+  dbReadTable("mpg") |> 
+  as_tibble()
+
+```
+
+```{r}
+mpg |> 
+  # select(where(is.numeric))
+  pivot_longer(cols = where(is.numeric), names_to = "my_num_var", values_to = "my_num_val") 
+  
+```
+
+```{r}
+mpg_db <- tbl(con, "mpg")
+mpg_db |> 
+  show_query()
+```
+
+```{r}
+mpg_db |> 
+  pivot_longer(cols = c(displ, year, cyl, cty, hwy), names_to = "my_num_var", values_to = "my_num_val") |> 
+  # show_query()
+  collect() 
+```
+
+
+```{r}
+seattle_pq |> 
+  to_duckdb() |> 
+  head() |> 
+  collect() |> 
+  select(where(is.numeric))
+
+# removing `head()` will cause a memory lag to the point of thrashing.  Or, at least, I lost patience!!!!
+seattle_pq |> 
+  to_duckdb() |> 
+  pivot_longer(cols = c(CheckoutMonth, Checkouts, CheckoutYear),
+               names_to = "my_variable", values_to = "my_value") |> 
+  head() |> 
+  collect() 
+
+```
+
+```{r}
+library(duckdb)
+duckdb::
+```
+
