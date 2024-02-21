@@ -1,7 +1,7 @@
 ---
-title: "duckdb_arrow"
+title: duckdb_arrow
 
-editor: "source"
+editor: source
 ---
 
 Tutorial from: <https://r4ds.hadley.nz/arrow.html>
@@ -55,8 +55,13 @@ seattle_csv
 
 ```{r}
 seattle_csv |> 
+  head(10) |>
   select(-ISBN) |> 
   glimpse()
+
+small_seattle_df <- seattle_csv |> 
+  head(10) |>
+  select(-ISBN) 
 ```
 
 ## dplyr
@@ -159,7 +164,7 @@ seattle_csv |>
   group_by(CheckoutMonth) |>
   summarize(TotalCheckouts = sum(Checkouts)) |>
   arrange(desc(CheckoutMonth)) |>
-  collect() |> 
+  collect() |>
   system.time()
 ```
 
@@ -169,7 +174,7 @@ seattle_pq |>
   group_by(CheckoutMonth) |>
   summarize(TotalCheckouts = sum(Checkouts)) |>
   arrange(desc(CheckoutMonth)) |>
-  collect() |> 
+  collect() |>
   system.time()
 ```
 
@@ -338,11 +343,10 @@ mpg_db |>
   collect() 
 ```
 
-
 ```{r}
 seattle_pq |> 
   to_duckdb() |> 
-  head() |> 
+  head() |>
   collect() |> 
   select(where(is.numeric))
 
@@ -358,6 +362,5 @@ seattle_pq |>
 
 ```{r}
 library(duckdb)
-duckdb::
+# duckdb::
 ```
-
