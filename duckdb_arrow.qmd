@@ -99,6 +99,7 @@ seattle_csv |>
 ## Rewriting Seattle library data to Parquet
 
 As a rough guide, arrow suggests that you avoid files smaller than 20MB and larger than 2GB and avoid partitions that produce more than 10,000 files.
+https://arrow.apache.org/docs/r/reference/write_dataset.html
 
 ```{r}
 pq_path <- "data/seattle-library-checkouts"
